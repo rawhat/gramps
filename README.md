@@ -3,22 +3,18 @@
 [![Package Version](https://img.shields.io/hexpm/v/gramps)](https://hex.pm/packages/gramps)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/gramps/)
 
-A Gleam project
+Some helper data types and functions for WebSockets.
 
-## Quick start
+Currently only used in [stratus](https://github.com/rawhat/stratus) but will
+eventually be used in [mist](https://github.com/rawhat/mist) as well.
 
-```sh
-gleam run   # Run the project
-gleam test  # Run the tests
-gleam shell # Run an Erlang shell
-```
+I will document this more, and am definitely open to adding / reshaping this to
+fit the needs of other packages!
 
 ## Installation
-
-If available on Hex this package can be added to your Gleam project:
 
 ```sh
 gleam add gramps
 ```
 
-and its documentation can be found at <https://hexdocs.pm/gramps>.
+Its documentation can be found at <https://hexdocs.pm/gramps>.
