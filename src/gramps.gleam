@@ -1,6 +1,10 @@
 import gleam/bit_array
 import gleam/bytes_builder.{type BytesBuilder}
 import gleam/crypto
+import gleam/dynamic.{type Dynamic}
+import gleam/http.{type Scheme}
+import gleam/http/request.{type Request, Request}
+import gleam/http/response.{type Response, Response}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -243,6 +247,59 @@ pub fn to_binary_frame(data: BitArray, mask: Bool) -> BytesBuilder {
   frame_to_bytes_builder(Data(BinaryFrame(size, maybe_masked_data)), mask)
 }
 
+pub fn get_messages(
+  data: BitArray,
+  frames: List(ParsedFrame),
+) -> #(List(ParsedFrame), BitArray) {
+  case frame_from_message(data) {
+    Ok(#(frame, <<>>)) -> #(list.reverse([frame, ..frames]), <<>>)
+    Ok(#(frame, rest)) -> get_messages(rest, [frame, ..frames])
+    Error(NeedMoreData(rest)) -> #(frames, rest)
+    Error(InvalidFrame) -> #(frames, data)
+  }
+}
+
+fn append_frame(left: Frame, length: Int, data: BitArray) -> Frame {
+  case left {
+    Data(TextFrame(len, payload)) ->
+      Data(TextFrame(len + length, <<payload:bits, data:bits>>))
+    Data(BinaryFrame(len, payload)) ->
+      Data(BinaryFrame(len + length, <<payload:bits, data:bits>>))
+    Control(CloseFrame(len, payload)) ->
+      Control(CloseFrame(len + length, <<payload:bits, data:bits>>))
+    Control(PingFrame(len, payload)) ->
+      Control(PingFrame(len + length, <<payload:bits, data:bits>>))
+    Control(PongFrame(len, payload)) ->
+      Control(PongFrame(len + length, <<payload:bits, data:bits>>))
+    Continuation(..) -> left
+  }
+}
+
+pub fn aggregate_frames(
+  frames: List(ParsedFrame),
+  previous: Option(Frame),
+  joined: List(Frame),
+) -> Result(List(Frame), Nil) {
+  case frames, previous {
+    [], _ -> Ok(list.reverse(joined))
+    [Complete(Continuation(length, data)), ..rest], Some(prev) -> {
+      let next = append_frame(prev, length, data)
+      aggregate_frames(rest, None, [next, ..joined])
+    }
+    [Incomplete(Continuation(length, data)), ..rest], Some(prev) -> {
+      let next = append_frame(prev, length, data)
+      aggregate_frames(rest, Some(next), joined)
+    }
+    [Incomplete(frame), ..rest], None -> {
+      aggregate_frames(rest, Some(frame), joined)
+    }
+    [Complete(frame), ..rest], None -> {
+      aggregate_frames(rest, None, [frame, ..joined])
+    }
+    _, _ -> Error(Nil)
+  }
+}
+
 const websocket_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 pub const websocket_client_key = "dGhlIHNhbXBsZSBub25jZQ=="
@@ -263,3 +320,116 @@ fn crypto_hash(hash hash: ShaHash, data data: String) -> String
 
 @external(erlang, "base64", "encode")
 fn base64_encode(data data: String) -> String
+
+pub type PacketType {
+  HttphBin
+  HttpBin
+}
+
+pub type DecodePacketError {
+  More(length: Int)
+  HttpError(reason: String)
+}
+
+type UriPacket {
+  AbsPath(String)
+  AbsoluteUri(scheme: Scheme, host: String, port: Int, path: String)
+}
+
+type DecodedPacket {
+  HttpRequest(method: String, uri: UriPacket, version: #(Int, Int))
+  HttpResponse(version: #(Int, Int), status: Int, text: String)
+  HttpHeader(unknown: Int, field: Dynamic, raw_field: String, value: String)
+  HttpEoh
+}
+
+@external(erlang, "gramps_ffi", "decode_packet")
+fn decode_packet(
+  kind: PacketType,
+  bin: BitArray,
+  opts: List(options),
+) -> Result(#(DecodedPacket, BitArray), DecodePacketError)
+
+fn get_headers(
+  data: BitArray,
+  headers: List(#(String, String)),
+) -> Result(#(List(#(String, String)), BitArray), DecodePacketError) {
+  case decode_packet(HttphBin, data, []) {
+    Ok(#(HttpEoh, rest)) -> Ok(#(headers, rest))
+    Ok(#(HttpHeader(raw_field: field, value: value, ..), rest)) ->
+      get_headers(rest, [#(string.lowercase(field), value), ..headers])
+    Ok(val) -> {
+      Error(HttpError(
+        "Expected only headers but got request/response: "
+        <> string.inspect(val),
+      ))
+    }
+    Error(reason) -> Error(reason)
+  }
+}
+
+pub fn read_response(
+  data: BitArray,
+) -> Result(#(Response(Nil), BitArray), DecodePacketError) {
+  case decode_packet(HttpBin, data, []) {
+    Ok(#(HttpResponse(_version, status, _text), rest)) -> {
+      case get_headers(rest, []) {
+        Ok(#(headers, rest)) -> {
+          Ok(#(Response(body: Nil, headers: headers, status: status), rest))
+        }
+        Error(reason) -> Error(reason)
+      }
+    }
+    Error(reason) -> Error(reason)
+    _ -> Error(HttpError("Unexpected data"))
+  }
+}
+
+pub fn read_request(
+  data: BitArray,
+) -> Result(#(Request(Nil), BitArray), DecodePacketError) {
+  case decode_packet(HttpBin, data, []) {
+    Ok(#(HttpRequest(method, uri, _version), rest)) -> {
+      case get_headers(rest, []) {
+        Ok(#(headers, rest)) -> {
+          let host =
+            headers
+            |> list.key_find("host")
+            |> result.unwrap("")
+          let #(scheme, host, port, path) = case uri {
+            AbsoluteUri(scheme, host, port, path) -> {
+              #(scheme, host, Some(port), path)
+            }
+            AbsPath(path) -> {
+              #(http.Http, host, None, path)
+            }
+          }
+          let #(path, query) =
+            path
+            |> string.split_once("?")
+            |> result.map(fn(pair) { #(pair.0, Some(pair.1)) })
+            |> result.unwrap(#(path, None))
+          let method = http.method_from_dynamic(dynamic.from(method))
+          Ok(#(
+            Request(
+              body: Nil,
+              headers: headers,
+              host: host,
+              path: path,
+              method: result.unwrap(method, http.Get),
+              port: port,
+              scheme: scheme,
+              query: query,
+            ),
+            rest,
+          ))
+        }
+        Error(reason) -> Error(reason)
+      }
+    }
+    Error(reason) -> Error(reason)
+    err -> {
+      Error(HttpError("Unexpected data: " <> string.inspect(err)))
+    }
+  }
+}
