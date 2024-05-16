@@ -3,17 +3,18 @@ import gleam/bytes_builder
 import gleam/http.{Http}
 import gleam/http/request
 import gleam/http/response
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleeunit
 import gleeunit/should
-import gramps
+import gramps/http as gramps_http
+import gramps/websocket
 
 pub fn main() {
   gleeunit.main()
 }
 
 pub fn it_should_encode_text_frame_without_mask_test() {
-  gramps.to_text_frame("hello, world!", False)
+  websocket.to_text_frame("hello, world!", None, None)
   |> should.equal(
     bytes_builder.from_bit_array(<<
       129, 13, 104, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33,
@@ -26,8 +27,8 @@ pub fn it_should_make_empty_pong_frame_with_mask_test() {
     22, 172, 3, 21, 180, 229, 185, 224, 250, 191, 218, 236, 236, 22, 253, 17,
     194, 133, 231, 254, 174, 158, 121, 106, 101, 253, 1, 21, 207, 148, 72, 20,
   >>
-  gramps.frame_to_bytes_builder(
-    gramps.Control(gramps.PongFrame(0, <<>>)),
+  websocket.frame_to_bytes_builder(
+    websocket.Control(websocket.PongFrame(0, <<>>)),
     Some(mask),
   )
   |> should.equal(
@@ -65,7 +66,7 @@ Connection: keep-alive
 
   req
   |> bit_array.from_string
-  |> gramps.read_request
+  |> gramps_http.read_request
   |> should.equal(Ok(#(expected, <<>>)))
 }
 
@@ -102,7 +103,7 @@ Content-Length: 304
       "http://localhost/objectserver/restapi/alerts/status/kf/12481%3ANCOMS",
     )
 
-  gramps.read_response(bit_array.from_string(resp))
+  gramps_http.read_response(bit_array.from_string(resp))
   |> should.equal(
     Ok(
       #(expected, <<
