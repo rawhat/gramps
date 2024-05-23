@@ -74,3 +74,6 @@ pub fn deflate(context: Context, data: BitArray) -> BitArray {
 
 @external(erlang, "zlib", "set_controlling_process")
 pub fn set_controlling_process(context: Context, pid: Pid) -> Atom
+
+@external(erlang, "zlib", "close")
+pub fn close(context: Context) -> Nil
