@@ -35,7 +35,14 @@ fn mask_data(
 ) -> BitArray {
   case data {
     <<masked:bits-size(8), rest:bits>> -> {
-      let assert Ok(mask_value) = list.at(masks, index % 4)
+      let assert [one, two, three, four] = masks
+      let mask_value = case index % 4 {
+        0 -> one
+        1 -> two
+        2 -> three
+        3 -> four
+        _ -> panic as "Somehow a value mod 4 is not 0, 1, 2, or 3"
+      }
       let unmasked = crypto_exor(mask_value, masked)
       mask_data(rest, masks, index + 1, <<resp:bits, unmasked:bits>>)
     }
