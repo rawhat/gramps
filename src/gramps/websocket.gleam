@@ -70,11 +70,12 @@ pub fn frame_from_message(
       compressed:1,
       _reserved:2,
       opcode:int-size(4),
-      1:1,
+      masked:1,
       payload_length:int-size(7),
       rest:bits,
     >> -> {
       let compressed = compressed == 1
+      let masked = masked == 1
       use <- bool.guard(
         when: compressed && option.is_none(context),
         return: Error(InvalidFrame),
@@ -84,15 +85,17 @@ pub fn frame_from_message(
         127 -> 64
         _ -> 0
       }
-      case rest {
-        <<
-          length:int-size(payload_size),
-          mask1:bytes-size(1),
-          mask2:bytes-size(1),
-          mask3:bytes-size(1),
-          mask4:bytes-size(1),
-          rest:bits,
-        >> -> {
+      let maybe_pair = case masked, rest {
+        True,
+          <<
+            length:int-size(payload_size),
+            mask1:bytes-size(1),
+            mask2:bytes-size(1),
+            mask3:bytes-size(1),
+            mask4:bytes-size(1),
+            rest:bits,
+          >>
+        -> {
           let payload_byte_size = case length {
             0 -> payload_length
             n -> n
@@ -101,40 +104,59 @@ pub fn frame_from_message(
             <<payload:bytes-size(payload_byte_size), rest:bits>> -> {
               let data =
                 mask_data(payload, [mask1, mask2, mask3, mask4], 0, <<>>)
-              case opcode {
-                0 -> {
-                  data
-                  |> inflate(compressed, context, _)
-                  |> result.map(fn(p) { Continuation(p.0, p.1) })
-                }
-                1 -> {
-                  data
-                  |> inflate(compressed, context, _)
-                  |> result.map(fn(p) { Data(TextFrame(p.0, p.1)) })
-                }
-                2 -> {
-                  data
-                  |> inflate(compressed, context, _)
-                  |> result.map(fn(p) { Data(BinaryFrame(p.0, p.1)) })
-                }
-                8 -> Ok(Control(CloseFrame(payload_length, data)))
-                9 -> Ok(Control(PingFrame(payload_length, data)))
-                10 -> Ok(Control(PongFrame(payload_length, data)))
-                _ -> Error(InvalidFrame)
-              }
-              |> result.then(fn(frame) {
-                case complete {
-                  1 -> Ok(#(Complete(frame), rest))
-                  0 -> Ok(#(Incomplete(frame), rest))
-                  _ -> Error(InvalidFrame)
-                }
-              })
+              Ok(#(data, rest))
             }
-            _ -> Error(NeedMoreData(message))
+            _ -> {
+              Error(NeedMoreData(message))
+            }
           }
         }
+        False, <<length:int-size(payload_size), rest:bits>> -> {
+          let payload_byte_size = case length {
+            0 -> payload_length
+            n -> n
+          }
+          case rest {
+            <<payload:bytes-size(payload_byte_size), rest:bits>> -> {
+              Ok(#(payload, rest))
+            }
+            _ -> {
+              Error(NeedMoreData(message))
+            }
+          }
+        }
+        _, _ -> Error(InvalidFrame)
+      }
+
+      use #(data, rest) <- result.try(maybe_pair)
+      case opcode {
+        0 -> {
+          data
+          |> inflate(compressed, context, _)
+          |> result.map(fn(p) { Continuation(p.0, p.1) })
+        }
+        1 -> {
+          data
+          |> inflate(compressed, context, _)
+          |> result.map(fn(p) { Data(TextFrame(p.0, p.1)) })
+        }
+        2 -> {
+          data
+          |> inflate(compressed, context, _)
+          |> result.map(fn(p) { Data(BinaryFrame(p.0, p.1)) })
+        }
+        8 -> Ok(Control(CloseFrame(payload_length, data)))
+        9 -> Ok(Control(PingFrame(payload_length, data)))
+        10 -> Ok(Control(PongFrame(payload_length, data)))
         _ -> Error(InvalidFrame)
       }
+      |> result.then(fn(frame) {
+        case complete {
+          1 -> Ok(#(Complete(frame), rest))
+          0 -> Ok(#(Incomplete(frame), rest))
+          _ -> Error(InvalidFrame)
+        }
+      })
     }
     _ -> Error(InvalidFrame)
   }

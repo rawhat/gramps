@@ -6,6 +6,7 @@ import gleam/http/response
 import gleam/option.{None, Some}
 import gleeunit
 import gleeunit/should
+import gramps/debug
 import gramps/http as gramps_http
 import gramps/websocket
 
@@ -117,4 +118,23 @@ Content-Length: 304
       >>),
     ),
   )
+}
+
+pub fn it_should_return_literal_bits_simple_test() {
+  let bits = <<1:1>>
+  let literal = debug.literal_bits(bits, [])
+
+  literal |> should.equal([1])
+}
+
+pub fn it_should_return_literal_bits_complex_test() {
+  let bits = <<129, 7, 111, 112, 101, 110, 101, 100, 33>>
+  let literal = debug.literal_bits(bits, [])
+
+  literal
+  |> should.equal([
+    1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1,
+    1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0,
+    0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+  ])
 }
