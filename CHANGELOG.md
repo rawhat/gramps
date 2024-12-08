@@ -1,4 +1,4 @@
-# Unreleased
+# v3.0.0
 - Bump `stdlib` requirement to >=0.44.0
 
 # v2.0.0
