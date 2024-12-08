@@ -1,5 +1,5 @@
 import gleam/bit_array
-import gleam/bytes_builder
+import gleam/bytes_tree
 import gleam/http.{Http}
 import gleam/http/request
 import gleam/http/response
@@ -17,7 +17,7 @@ pub fn main() {
 pub fn it_should_encode_text_frame_without_mask_test() {
   websocket.to_text_frame("hello, world!", None, None)
   |> should.equal(
-    bytes_builder.from_bit_array(<<
+    bytes_tree.from_bit_array(<<
       129, 13, 104, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33,
     >>),
   )
@@ -28,12 +28,12 @@ pub fn it_should_make_empty_pong_frame_with_mask_test() {
     22, 172, 3, 21, 180, 229, 185, 224, 250, 191, 218, 236, 236, 22, 253, 17,
     194, 133, 231, 254, 174, 158, 121, 106, 101, 253, 1, 21, 207, 148, 72, 20,
   >>
-  websocket.frame_to_bytes_builder(
+  websocket.frame_to_bytes_tree(
     websocket.Control(websocket.PongFrame(0, <<>>)),
     Some(mask),
   )
   |> should.equal(
-    bytes_builder.from_bit_array(<<1:1, 0:3, 10:4, 1:1, 0:7, mask:bits>>),
+    bytes_tree.from_bit_array(<<1:1, 0:3, 10:4, 1:1, 0:7, mask:bits>>),
   )
 }
 

@@ -1,6 +1,6 @@
 import gleam/bit_array
 import gleam/bool
-import gleam/bytes_builder.{type BytesBuilder}
+import gleam/bytes_tree.{type BytesTree}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -162,10 +162,7 @@ pub fn frame_from_message(
   }
 }
 
-pub fn frame_to_bytes_builder(
-  frame: Frame,
-  mask: Option(BitArray),
-) -> BytesBuilder {
+pub fn frame_to_bytes_tree(frame: Frame, mask: Option(BitArray)) -> BytesTree {
   case frame {
     Data(TextFrame(payload_length, payload)) ->
       make_frame(1, payload_length, payload, mask)
@@ -181,11 +178,11 @@ pub fn frame_to_bytes_builder(
   }
 }
 
-pub fn compressed_frame_to_bytes_builder(
+pub fn compressed_frame_to_bytes_tree(
   frame: Frame,
   context: Context,
   mask: Option(BitArray),
-) -> BytesBuilder {
+) -> BytesTree {
   case frame {
     Data(TextFrame(_payload_length, payload)) ->
       make_compressed_frame(1, payload, context, mask)
@@ -214,7 +211,7 @@ fn make_compressed_frame(
   payload: BitArray,
   context: Context,
   mask: Option(BitArray),
-) -> BytesBuilder {
+) -> BytesTree {
   let data = compression.deflate(context, payload)
   let length = bit_array.byte_size(data)
   let length_section = make_length(length)
@@ -236,7 +233,7 @@ fn make_compressed_frame(
     mask_key:bits,
     data:bits,
   >>
-  |> bytes_builder.from_bit_array
+  |> bytes_tree.from_bit_array
 }
 
 fn make_frame(
@@ -244,7 +241,7 @@ fn make_frame(
   length: Int,
   payload: BitArray,
   mask: Option(BitArray),
-) -> BytesBuilder {
+) -> BytesTree {
   let length_section = make_length(length)
 
   let masked = case option.is_some(mask) {
@@ -263,7 +260,7 @@ fn make_frame(
     mask_key:bits,
     payload:bits,
   >>
-  |> bytes_builder.from_bit_array
+  |> bytes_tree.from_bit_array
 }
 
 fn apply_mask(data: BitArray, mask: BitArray) -> BitArray {
@@ -280,7 +277,7 @@ pub fn to_text_frame(
   data: String,
   context: Option(Context),
   mask: Option(BitArray),
-) -> BytesBuilder {
+) -> BytesTree {
   let data = bit_array.from_string(data)
   let data =
     mask
@@ -289,8 +286,8 @@ pub fn to_text_frame(
   let size = bit_array.byte_size(data)
   let frame = Data(TextFrame(size, data))
   case context {
-    Some(context) -> compressed_frame_to_bytes_builder(frame, context, mask)
-    _ -> frame_to_bytes_builder(frame, mask)
+    Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
+    _ -> frame_to_bytes_tree(frame, mask)
   }
 }
 
@@ -298,7 +295,7 @@ pub fn to_binary_frame(
   data: BitArray,
   context: Option(Context),
   mask: Option(BitArray),
-) -> BytesBuilder {
+) -> BytesTree {
   let data =
     mask
     |> option.map(apply_mask(data, _))
@@ -306,8 +303,8 @@ pub fn to_binary_frame(
   let size = bit_array.byte_size(data)
   let frame = Data(BinaryFrame(size, data))
   case context {
-    Some(context) -> compressed_frame_to_bytes_builder(frame, context, mask)
-    _ -> frame_to_bytes_builder(frame, mask)
+    Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
+    _ -> frame_to_bytes_tree(frame, mask)
   }
 }
 

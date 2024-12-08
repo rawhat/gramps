@@ -1,5 +1,5 @@
 import gleam/bit_array
-import gleam/bytes_builder.{type BytesBuilder}
+import gleam/bytes_tree.{type BytesTree}
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process.{type Pid}
 
@@ -47,22 +47,22 @@ fn deflate_init(
 fn open() -> Context
 
 @external(erlang, "zlib", "inflate")
-fn do_inflate(context: Context, data: BitArray) -> BytesBuilder
+fn do_inflate(context: Context, data: BitArray) -> BytesTree
 
 pub fn inflate(context: Context, data: BitArray) -> BitArray {
   context
   |> do_inflate(<<data:bits, 0x00, 0x00, 0xFF, 0xFF>>)
-  |> bytes_builder.to_bit_array
+  |> bytes_tree.to_bit_array
 }
 
 @external(erlang, "zlib", "deflate")
-fn do_deflate(context: Context, data: BitArray, flush: Flush) -> BytesBuilder
+fn do_deflate(context: Context, data: BitArray, flush: Flush) -> BytesTree
 
 pub fn deflate(context: Context, data: BitArray) -> BitArray {
   let data =
     context
     |> do_deflate(data, Sync)
-    |> bytes_builder.to_bit_array
+    |> bytes_tree.to_bit_array
 
   let size = bit_array.byte_size(data) - 4
 
