@@ -1,3 +1,6 @@
+# Unreleased
+- Bump `stdlib` requirement to >=0.44.0
+
 # v2.0.0
 - Reorganized the modules
 - Added some HTTP stuff
