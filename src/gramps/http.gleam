@@ -97,7 +97,7 @@ pub fn read_request(
             |> string.split_once("?")
             |> result.map(fn(pair) { #(pair.0, Some(pair.1)) })
             |> result.unwrap(#(path, None))
-          let method = http.method_from_dynamic(dynamic.from(method))
+          let method = http.parse_method(method)
           Ok(#(
             Request(
               body: Nil,
