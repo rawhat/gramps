@@ -150,7 +150,7 @@ pub fn frame_from_message(
         10 -> Ok(Control(PongFrame(payload_length, data)))
         _ -> Error(InvalidFrame)
       }
-      |> result.then(fn(frame) {
+      |> result.try(fn(frame) {
         case complete {
           1 -> Ok(#(Complete(frame), rest))
           0 -> Ok(#(Incomplete(frame), rest))
