@@ -1,5 +1,5 @@
 name = "gramps"
-version = "3.0.2"
+version = "3.0.3"
 description = "A Gleam HTTP and WebSocket helper library"
 
 licences = ["Apache-2.0"]

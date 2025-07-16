@@ -1,3 +1,7 @@
+# v3.0.3
+
+- Remove some deprecated functions
+
 # v3.0.1
 
 - Relaxed `gleam_http` constraint to permit v4
