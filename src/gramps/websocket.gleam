@@ -1,6 +1,7 @@
 import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
+import gleam/crypto
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -224,13 +225,7 @@ fn make_compressed_frame(
   let mask_key = option.unwrap(mask, <<>>)
 
   <<
-    1:1,
-    1:1,
-    0:2,
-    opcode:4,
-    masked:1,
-    length_section:bits,
-    mask_key:bits,
+    1:1, 1:1, 0:2, opcode:4, masked:1, length_section:bits, mask_key:bits,
     data:bits,
   >>
   |> bytes_tree.from_bit_array
@@ -252,12 +247,7 @@ fn make_frame(
   let mask_key = option.unwrap(mask, <<>>)
 
   <<
-    1:1,
-    0:3,
-    opcode:4,
-    masked:1,
-    length_section:bits,
-    mask_key:bits,
+    1:1, 0:3, opcode:4, masked:1, length_section:bits, mask_key:bits,
     payload:bits,
   >>
   |> bytes_tree.from_bit_array
@@ -364,7 +354,10 @@ pub fn aggregate_frames(
 
 const websocket_key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-pub const client_key = "dGhlIHNhbXBsZSBub25jZQ=="
+pub fn make_client_key() -> String {
+  let bytes = crypto.strong_random_bytes(16)
+  bit_array.base64_encode(bytes, True)
+}
 
 type ShaHash {
   Sha

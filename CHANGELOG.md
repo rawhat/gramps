@@ -1,3 +1,8 @@
+# Unreleased
+
+- Remove `client_key` public variable
+    - Replace with `make_client_key` to properly conform to the RFC constraints
+
 # v3.0.3
 
 - Remove some deprecated functions
