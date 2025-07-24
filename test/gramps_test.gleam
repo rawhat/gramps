@@ -29,7 +29,7 @@ pub fn it_should_make_empty_pong_frame_with_mask_test() {
     194, 133, 231, 254, 174, 158, 121, 106, 101, 253, 1, 21, 207, 148, 72, 20,
   >>
   websocket.frame_to_bytes_tree(
-    websocket.Control(websocket.PongFrame(0, <<>>)),
+    websocket.Control(websocket.PongFrame(<<>>)),
     Some(mask),
   )
   |> should.equal(

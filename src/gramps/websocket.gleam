@@ -9,14 +9,27 @@ import gleam/string
 import gramps/websocket/compression.{type Context}
 
 pub type DataFrame {
-  TextFrame(payload_length: Int, payload: BitArray)
-  BinaryFrame(payload_length: Int, payload: BitArray)
+  TextFrame(payload: BitArray)
+  BinaryFrame(payload: BitArray)
+}
+
+pub type CloseReason {
+  NotProvided
+  Normal(body: BitArray)
+  GoingAway(body: BitArray)
+  ProtocolError(body: BitArray)
+  UnexpectedDataType(body: BitArray)
+  InconsistentDataType(body: BitArray)
+  PolicyViolation(body: BitArray)
+  MessageTooBig(body: BitArray)
+  MissingExtensions(body: BitArray)
+  UnexpectedCondition(body: BitArray)
 }
 
 pub type ControlFrame {
-  CloseFrame(payload_length: Int, payload: BitArray)
-  PingFrame(payload_length: Int, payload: BitArray)
-  PongFrame(payload_length: Int, payload: BitArray)
+  CloseFrame(reason: CloseReason)
+  PingFrame(payload: BitArray)
+  PongFrame(payload: BitArray)
 }
 
 pub type Frame {
@@ -139,16 +152,36 @@ pub fn frame_from_message(
         1 -> {
           data
           |> inflate(compressed, context, _)
-          |> result.map(fn(p) { Data(TextFrame(p.0, p.1)) })
+          |> result.map(fn(p) { Data(TextFrame(p.1)) })
         }
         2 -> {
           data
           |> inflate(compressed, context, _)
-          |> result.map(fn(p) { Data(BinaryFrame(p.0, p.1)) })
+          |> result.map(fn(p) { Data(BinaryFrame(p.1)) })
         }
-        8 -> Ok(Control(CloseFrame(payload_length, data)))
-        9 -> Ok(Control(PingFrame(payload_length, data)))
-        10 -> Ok(Control(PongFrame(payload_length, data)))
+        8 -> {
+          case data {
+            <<1000:16, rest:bits>> -> Ok(Control(CloseFrame(Normal(rest))))
+            <<1001:16, rest:bits>> -> Ok(Control(CloseFrame(GoingAway(rest))))
+            <<1002:16, rest:bits>> ->
+              Ok(Control(CloseFrame(ProtocolError(rest))))
+            <<1003:16, rest:bits>> ->
+              Ok(Control(CloseFrame(UnexpectedDataType(rest))))
+            <<1007:16, rest:bits>> ->
+              Ok(Control(CloseFrame(InconsistentDataType(rest))))
+            <<1008:16, rest:bits>> ->
+              Ok(Control(CloseFrame(PolicyViolation(rest))))
+            <<1009:16, rest:bits>> ->
+              Ok(Control(CloseFrame(MessageTooBig(rest))))
+            <<1010:16, rest:bits>> ->
+              Ok(Control(CloseFrame(MissingExtensions(rest))))
+            <<1011:16, rest:bits>> ->
+              Ok(Control(CloseFrame(UnexpectedCondition(rest))))
+            _ -> Ok(Control(CloseFrame(NotProvided)))
+          }
+        }
+        9 -> Ok(Control(PingFrame(data)))
+        10 -> Ok(Control(PongFrame(data)))
         _ -> Error(InvalidFrame)
       }
       |> result.try(fn(frame) {
@@ -165,16 +198,68 @@ pub fn frame_from_message(
 
 pub fn frame_to_bytes_tree(frame: Frame, mask: Option(BitArray)) -> BytesTree {
   case frame {
-    Data(TextFrame(payload_length, payload)) ->
+    Data(TextFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(1, payload_length, payload, mask)
-    Control(CloseFrame(payload_length, payload)) ->
+    }
+    Control(CloseFrame(reason)) -> {
+      let #(payload_length, payload) = case reason {
+        NotProvided -> #(0, <<>>)
+        GoingAway(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1001:16, body:bits>>)
+        }
+        InconsistentDataType(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1007:16, body:bits>>)
+        }
+        MessageTooBig(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1009:16, body:bits>>)
+        }
+        MissingExtensions(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1010:16, body:bits>>)
+        }
+        Normal(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1000:16, body:bits>>)
+        }
+        PolicyViolation(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1008:16, body:bits>>)
+        }
+        ProtocolError(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1002:16, body:bits>>)
+        }
+        UnexpectedCondition(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1011:16, body:bits>>)
+        }
+        UnexpectedDataType(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1003:16, body:bits>>)
+        }
+      }
+      let payload = case mask {
+        Some(m) -> apply_mask(payload, m)
+        _ -> payload
+      }
       make_frame(8, payload_length, payload, mask)
-    Data(BinaryFrame(payload_length, payload)) ->
+    }
+    Data(BinaryFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(2, payload_length, payload, mask)
-    Control(PongFrame(payload_length, payload)) ->
+    }
+    Control(PongFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(10, payload_length, payload, mask)
-    Control(PingFrame(payload_length, payload)) ->
+    }
+    Control(PingFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(9, payload_length, payload, mask)
+    }
     Continuation(length, payload) -> make_frame(0, length, payload, mask)
   }
 }
@@ -185,16 +270,63 @@ pub fn compressed_frame_to_bytes_tree(
   mask: Option(BitArray),
 ) -> BytesTree {
   case frame {
-    Data(TextFrame(_payload_length, payload)) ->
-      make_compressed_frame(1, payload, context, mask)
-    Data(BinaryFrame(_payload_length, payload)) ->
+    Data(TextFrame(payload)) -> make_compressed_frame(1, payload, context, mask)
+    Data(BinaryFrame(payload)) ->
       make_compressed_frame(2, payload, context, mask)
-    Control(CloseFrame(payload_length, payload)) ->
+    Control(CloseFrame(reason)) -> {
+      let #(payload_length, payload) = case reason {
+        NotProvided -> #(0, <<>>)
+        GoingAway(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1001:16, body:bits>>)
+        }
+        InconsistentDataType(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1007:16, body:bits>>)
+        }
+        MessageTooBig(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1009:16, body:bits>>)
+        }
+        MissingExtensions(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1010:16, body:bits>>)
+        }
+        Normal(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1000:16, body:bits>>)
+        }
+        PolicyViolation(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1008:16, body:bits>>)
+        }
+        ProtocolError(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1002:16, body:bits>>)
+        }
+        UnexpectedCondition(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1011:16, body:bits>>)
+        }
+        UnexpectedDataType(body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          #(payload_size, <<1003:16, body:bits>>)
+        }
+      }
+      let payload = case mask {
+        Some(m) -> apply_mask(payload, m)
+        _ -> payload
+      }
       make_frame(8, payload_length, payload, mask)
-    Control(PongFrame(payload_length, payload)) ->
+    }
+    Control(PongFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(10, payload_length, payload, mask)
-    Control(PingFrame(payload_length, payload)) ->
+    }
+    Control(PingFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
       make_frame(9, payload_length, payload, mask)
+    }
     Continuation(length, payload) -> make_frame(0, length, payload, mask)
   }
 }
@@ -284,8 +416,7 @@ pub fn to_text_frame(
     mask
     |> option.map(apply_mask(data, _))
     |> option.unwrap(data)
-  let size = bit_array.byte_size(data)
-  let frame = Data(TextFrame(size, data))
+  let frame = Data(TextFrame(data))
   case context {
     Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
     _ -> frame_to_bytes_tree(frame, mask)
@@ -301,8 +432,7 @@ pub fn to_binary_frame(
     mask
     |> option.map(apply_mask(data, _))
     |> option.unwrap(data)
-  let size = bit_array.byte_size(data)
-  let frame = Data(BinaryFrame(size, data))
+  let frame = Data(BinaryFrame(data))
   case context {
     Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
     _ -> frame_to_bytes_tree(frame, mask)
@@ -322,18 +452,15 @@ pub fn get_messages(
   }
 }
 
-fn append_frame(left: Frame, length: Int, data: BitArray) -> Frame {
+fn append_frame(left: Frame, data: BitArray) -> Frame {
   case left {
-    Data(TextFrame(len, payload)) ->
-      Data(TextFrame(len + length, <<payload:bits, data:bits>>))
-    Data(BinaryFrame(len, payload)) ->
-      Data(BinaryFrame(len + length, <<payload:bits, data:bits>>))
-    Control(CloseFrame(len, payload)) ->
-      Control(CloseFrame(len + length, <<payload:bits, data:bits>>))
-    Control(PingFrame(len, payload)) ->
-      Control(PingFrame(len + length, <<payload:bits, data:bits>>))
-    Control(PongFrame(len, payload)) ->
-      Control(PongFrame(len + length, <<payload:bits, data:bits>>))
+    Data(TextFrame(payload)) -> Data(TextFrame(<<payload:bits, data:bits>>))
+    Data(BinaryFrame(payload)) -> Data(BinaryFrame(<<payload:bits, data:bits>>))
+    Control(CloseFrame(..)) -> left
+    Control(PingFrame(payload)) ->
+      Control(PingFrame(<<payload:bits, data:bits>>))
+    Control(PongFrame(payload)) ->
+      Control(PongFrame(<<payload:bits, data:bits>>))
     Continuation(..) -> left
   }
 }
@@ -345,12 +472,12 @@ pub fn aggregate_frames(
 ) -> Result(List(Frame), Nil) {
   case frames, previous {
     [], _ -> Ok(list.reverse(joined))
-    [Complete(Continuation(length, data)), ..rest], Some(prev) -> {
-      let next = append_frame(prev, length, data)
+    [Complete(Continuation(payload: data, ..)), ..rest], Some(prev) -> {
+      let next = append_frame(prev, data)
       aggregate_frames(rest, None, [next, ..joined])
     }
-    [Incomplete(Continuation(length, data)), ..rest], Some(prev) -> {
-      let next = append_frame(prev, length, data)
+    [Incomplete(Continuation(payload: data, ..)), ..rest], Some(prev) -> {
+      let next = append_frame(prev, data)
       aggregate_frames(rest, Some(next), joined)
     }
     [Incomplete(frame), ..rest], None -> {
