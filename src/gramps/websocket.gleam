@@ -225,7 +225,13 @@ fn make_compressed_frame(
   let mask_key = option.unwrap(mask, <<>>)
 
   <<
-    1:1, 1:1, 0:2, opcode:4, masked:1, length_section:bits, mask_key:bits,
+    1:1,
+    1:1,
+    0:2,
+    opcode:4,
+    masked:1,
+    length_section:bits,
+    mask_key:bits,
     data:bits,
   >>
   |> bytes_tree.from_bit_array
@@ -247,7 +253,12 @@ fn make_frame(
   let mask_key = option.unwrap(mask, <<>>)
 
   <<
-    1:1, 0:3, opcode:4, masked:1, length_section:bits, mask_key:bits,
+    1:1,
+    0:3,
+    opcode:4,
+    masked:1,
+    length_section:bits,
+    mask_key:bits,
     payload:bits,
   >>
   |> bytes_tree.from_bit_array
