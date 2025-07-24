@@ -5,8 +5,7 @@
 
 Some helper data types and functions for WebSockets.
 
-Currently only used in [stratus](https://github.com/rawhat/stratus) but will
-eventually be used in [mist](https://github.com/rawhat/mist) as well.
+Used in [stratus](https://github.com/rawhat/stratus) and [mist](https://github.com/rawhat/mist) as well.
 
 I will document this more, and am definitely open to adding / reshaping this to
 fit the needs of other packages!

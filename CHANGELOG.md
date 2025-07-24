@@ -1,4 +1,4 @@
-# Unreleased
+# v4.0.0
 
 - Remove `client_key` public variable
     - Replace with `make_client_key` to properly conform to the RFC constraints
