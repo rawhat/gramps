@@ -1,4 +1,4 @@
-# Unreleased
+# v5.0.0
 
 - Refactor some messages (mostly removing duplicate `payload_length` fields)
 - Add support for exit reasons
