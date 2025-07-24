@@ -1,3 +1,8 @@
+# Unreleased
+
+- Refactor some messages (mostly removing duplicate `payload_length` fields)
+- Add support for exit reasons
+
 # v4.0.0
 
 - Remove `client_key` public variable
