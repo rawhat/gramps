@@ -24,6 +24,12 @@ pub type CloseReason {
   MessageTooBig(body: BitArray)
   MissingExtensions(body: BitArray)
   UnexpectedCondition(body: BitArray)
+  /// Usually used for `4000` codes.
+  CustomCloseReason(
+    /// If `code >= 5000`, it will be the same as a `Normal` close reason.
+    code: Int,
+    body: BitArray,
+  )
 }
 
 pub type ControlFrame {
@@ -177,6 +183,8 @@ pub fn frame_from_message(
               Ok(Control(CloseFrame(MissingExtensions(rest))))
             <<1011:16, rest:bits>> ->
               Ok(Control(CloseFrame(UnexpectedCondition(rest))))
+            <<code:16, rest:bits>> ->
+              Ok(Control(CloseFrame(CustomCloseReason(code, rest))))
             _ -> Ok(Control(CloseFrame(NotProvided)))
           }
         }
@@ -240,6 +248,15 @@ pub fn frame_to_bytes_tree(frame: Frame, mask: Option(BitArray)) -> BytesTree {
         UnexpectedDataType(body:) -> {
           let payload_size = bit_array.byte_size(body) + 2
           #(payload_size, <<1003:16, body:bits>>)
+        }
+        CustomCloseReason(code:, body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          // Prevents integer overflow and changes the status code to `Normal` for invalid codes.
+          let code = case code < 5000 {
+            True -> code
+            False -> 1000
+          }
+          #(payload_size, <<code:16, body:bits>>)
         }
       }
       let payload = case mask {
@@ -311,6 +328,15 @@ pub fn compressed_frame_to_bytes_tree(
         UnexpectedDataType(body:) -> {
           let payload_size = bit_array.byte_size(body) + 2
           #(payload_size, <<1003:16, body:bits>>)
+        }
+        CustomCloseReason(code:, body:) -> {
+          let payload_size = bit_array.byte_size(body) + 2
+          // Prevents integer overflow and changes the status code to `Normal` for invalid codes.
+          let code = case code < 5000 {
+            True -> code
+            False -> 1000
+          }
+          #(payload_size, <<code:16, body:bits>>)
         }
       }
       let payload = case mask {
