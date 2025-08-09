@@ -515,7 +515,7 @@ pub fn has_deflate(extensions: List(String)) -> Bool {
   list.any(extensions, fn(str) { str == "permessage-deflate" })
 }
 
-pub fn get_client_takeovers(extensions: List(String)) -> ContextTakeover {
+pub fn get_context_takeovers(extensions: List(String)) -> ContextTakeover {
   let no_client_context_takeover =
     list.any(extensions, fn(str) { str == "client_no_context_takeover" })
   let no_server_context_takeover =
