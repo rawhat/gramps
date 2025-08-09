@@ -1,3 +1,8 @@
+# v6.0.0
+
+- Refactor `websocket` module a fair bit
+- Fix/support some compression flags
+
 # v5.0.0
 
 - Refactor some messages (mostly removing duplicate `payload_length` fields)
