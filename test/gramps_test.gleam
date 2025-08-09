@@ -5,7 +5,6 @@ import gleam/http/request
 import gleam/http/response
 import gleam/option.{None, Some}
 import gleeunit
-import gleeunit/should
 import gramps/debug
 import gramps/http as gramps_http
 import gramps/websocket
@@ -15,26 +14,47 @@ pub fn main() {
 }
 
 pub fn it_should_encode_text_frame_without_mask_test() {
-  websocket.to_text_frame("hello, world!", None, None)
-  |> should.equal(
-    bytes_tree.from_bit_array(<<
-      129, 13, 104, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33,
-    >>),
-  )
+  assert websocket.encode_text_frame("hello, world!", None, None)
+    == bytes_tree.from_bit_array(<<1:1, 0:3, 1:4, 0:1, 13:7, "hello, world!">>)
 }
 
 pub fn it_should_make_empty_pong_frame_with_mask_test() {
-  let mask = <<
-    22, 172, 3, 21, 180, 229, 185, 224, 250, 191, 218, 236, 236, 22, 253, 17,
-    194, 133, 231, 254, 174, 158, 121, 106, 101, 253, 1, 21, 207, 148, 72, 20,
-  >>
-  websocket.frame_to_bytes_tree(
-    websocket.Control(websocket.PongFrame(<<>>)),
-    Some(mask),
-  )
-  |> should.equal(
-    bytes_tree.from_bit_array(<<1:1, 0:3, 10:4, 1:1, 0:7, mask:bits>>),
-  )
+  let mask = <<26, 237, 79, 237>>
+  assert websocket.encode_pong_frame(<<>>, Some(mask))
+    == bytes_tree.from_bit_array(<<1:1, 0:3, 10:4, 1:1, 0:7, mask:bits>>)
+}
+
+pub fn it_should_decode_close_frame_with_reason_test() {
+  let msg = <<136, 12, 3, 233, 103, 111, 105, 110, 103, 32, 97, 119, 97, 121>>
+  assert websocket.decode_frame(msg, None)
+    == Ok(
+      #(
+        websocket.Complete(
+          websocket.Control(
+            websocket.CloseFrame(websocket.GoingAway(<<"going away">>)),
+          ),
+        ),
+        <<>>,
+      ),
+    )
+}
+
+pub fn it_should_encode_close_frame_with_reason_test() {
+  let mask = <<26, 237, 79, 237>>
+  let masked = websocket.apply_mask(<<1001:16, "going away">>, Some(mask))
+  assert websocket.encode_close_frame(
+      websocket.GoingAway(<<"going away">>),
+      Some(mask),
+    )
+    == bytes_tree.from_bit_array(<<
+      1:1,
+      0:3,
+      8:4,
+      1:1,
+      bit_array.byte_size(masked):7,
+      mask:bits,
+      masked:bits,
+    >>)
 }
 
 pub fn it_should_parse_valid_request_test() {
@@ -65,10 +85,11 @@ Connection: keep-alive
     |> request.set_header("user-agent", "Mozilla/5.0")
     |> request.set_header("host", "www.example.com")
 
-  req
-  |> bit_array.from_string
-  |> gramps_http.read_request
-  |> should.equal(Ok(#(expected, <<>>)))
+  let read =
+    req
+    |> bit_array.from_string
+    |> gramps_http.read_request
+  assert read == Ok(#(expected, <<>>))
 }
 
 pub fn it_should_parse_valid_response_test() {
@@ -104,9 +125,8 @@ Content-Length: 304
       "http://localhost/objectserver/restapi/alerts/status/kf/12481%3ANCOMS",
     )
 
-  gramps_http.read_response(bit_array.from_string(resp))
-  |> should.equal(
-    Ok(
+  assert gramps_http.read_response(bit_array.from_string(resp))
+    == Ok(
       #(expected, <<
         "{
 	\"entry\":	{
@@ -116,25 +136,24 @@ Content-Length: 304
 	}
 }":utf8,
       >>),
-    ),
-  )
+    )
 }
 
 pub fn it_should_return_literal_bits_simple_test() {
   let bits = <<1:1>>
   let literal = debug.literal_bits(bits, [])
 
-  literal |> should.equal([1])
+  assert literal == [1]
 }
 
 pub fn it_should_return_literal_bits_complex_test() {
   let bits = <<129, 7, 111, 112, 101, 110, 101, 100, 33>>
   let literal = debug.literal_bits(bits, [])
 
-  literal
-  |> should.equal([
-    1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1,
-    1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0,
-    0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-  ])
+  assert literal
+    == [
+      1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0,
+      1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1,
+      1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    ]
 }

@@ -6,7 +6,9 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import gramps/websocket/compression.{type Context}
+import gramps/websocket/compression.{
+  type Context, type ContextTakeover, ContextTakeover,
+}
 
 pub type DataFrame {
   TextFrame(payload: BitArray)
@@ -80,7 +82,7 @@ pub type ParsedFrame {
   Incomplete(Frame)
 }
 
-pub fn frame_from_message(
+pub fn decode_frame(
   message: BitArray,
   context: Option(Context),
 ) -> Result(#(ParsedFrame, BitArray), FrameParseError) {
@@ -153,17 +155,19 @@ pub fn frame_from_message(
         0 -> {
           data
           |> inflate(compressed, context, _)
-          |> result.map(fn(p) { Continuation(p.0, p.1) })
+          |> result.map(fn(decompressed) {
+            Continuation(payload_size, decompressed)
+          })
         }
         1 -> {
           data
           |> inflate(compressed, context, _)
-          |> result.map(fn(p) { Data(TextFrame(p.1)) })
+          |> result.map(fn(decompressed) { Data(TextFrame(decompressed)) })
         }
         2 -> {
           data
           |> inflate(compressed, context, _)
-          |> result.map(fn(p) { Data(BinaryFrame(p.1)) })
+          |> result.map(fn(decompressed) { Data(BinaryFrame(decompressed)) })
         }
         8 -> {
           case data {
@@ -204,92 +208,56 @@ pub fn frame_from_message(
   }
 }
 
-pub fn frame_to_bytes_tree(frame: Frame, mask: Option(BitArray)) -> BytesTree {
-  case frame {
-    Data(TextFrame(payload)) -> {
-      let payload_length = bit_array.byte_size(payload)
-      make_frame(1, payload_length, payload, mask)
-    }
-    Control(CloseFrame(reason)) -> {
-      let #(payload_length, payload) = case reason {
-        NotProvided -> #(0, <<>>)
-        GoingAway(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1001:16, body:bits>>)
-        }
-        InconsistentDataType(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1007:16, body:bits>>)
-        }
-        MessageTooBig(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1009:16, body:bits>>)
-        }
-        MissingExtensions(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1010:16, body:bits>>)
-        }
-        Normal(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1000:16, body:bits>>)
-        }
-        PolicyViolation(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1008:16, body:bits>>)
-        }
-        ProtocolError(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1002:16, body:bits>>)
-        }
-        UnexpectedCondition(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1011:16, body:bits>>)
-        }
-        UnexpectedDataType(body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          #(payload_size, <<1003:16, body:bits>>)
-        }
-        CustomCloseReason(code:, body:) -> {
-          let payload_size = bit_array.byte_size(body) + 2
-          // Prevents integer overflow and changes the status code to `Normal` for invalid codes.
-          let code = case code < 5000 {
-            True -> code
-            False -> 1000
-          }
-          #(payload_size, <<code:16, body:bits>>)
-        }
-      }
-      let payload = case mask {
-        Some(m) -> apply_mask(payload, m)
-        _ -> payload
-      }
-      make_frame(8, payload_length, payload, mask)
-    }
-    Data(BinaryFrame(payload)) -> {
-      let payload_length = bit_array.byte_size(payload)
-      make_frame(2, payload_length, payload, mask)
-    }
-    Control(PongFrame(payload)) -> {
-      let payload_length = bit_array.byte_size(payload)
-      make_frame(10, payload_length, payload, mask)
-    }
-    Control(PingFrame(payload)) -> {
-      let payload_length = bit_array.byte_size(payload)
-      make_frame(9, payload_length, payload, mask)
-    }
-    Continuation(length, payload) -> make_frame(0, length, payload, mask)
-  }
+pub fn encode_text_frame(
+  data: String,
+  context: Option(Context),
+  mask: Option(BitArray),
+) -> BytesTree {
+  to_frame(bit_array.from_string(data), context, mask, TextFrame, Data)
 }
 
-pub fn compressed_frame_to_bytes_tree(
+pub fn encode_binary_frame(
+  data: BitArray,
+  context: Option(Context),
+  mask: Option(BitArray),
+) -> BytesTree {
+  to_frame(data, context, mask, BinaryFrame, Data)
+}
+
+pub fn encode_close_frame(
+  reason: CloseReason,
+  mask: Option(BitArray),
+) -> BytesTree {
+  encode_frame(Control(CloseFrame(reason)), Uncompressed, mask)
+}
+
+pub fn encode_ping_frame(data: BitArray, mask: Option(BitArray)) -> BytesTree {
+  to_frame(data, None, mask, PingFrame, Control)
+}
+
+pub fn encode_pong_frame(data: BitArray, mask: Option(BitArray)) -> BytesTree {
+  to_frame(data, None, mask, PongFrame, Control)
+}
+
+pub fn encode_continuation_frame(
+  data: BitArray,
+  total_size: Int,
+  mask: Option(BitArray),
+) -> BytesTree {
+  let payload = apply_mask(data, mask)
+  encode_frame(Continuation(total_size, payload), Uncompressed, mask)
+}
+
+fn encode_frame(
   frame: Frame,
-  context: Context,
+  compressed: Compression,
   mask: Option(BitArray),
 ) -> BytesTree {
   case frame {
-    Data(TextFrame(payload)) -> make_compressed_frame(1, payload, context, mask)
-    Data(BinaryFrame(payload)) ->
-      make_compressed_frame(2, payload, context, mask)
+    Data(TextFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
+      make_frame(1, payload_length, payload, compressed, mask)
+    }
     Control(CloseFrame(reason)) -> {
       let #(payload_length, payload) = case reason {
         NotProvided -> #(0, <<>>)
@@ -339,21 +307,22 @@ pub fn compressed_frame_to_bytes_tree(
           #(payload_size, <<code:16, body:bits>>)
         }
       }
-      let payload = case mask {
-        Some(m) -> apply_mask(payload, m)
-        _ -> payload
-      }
-      make_frame(8, payload_length, payload, mask)
+      make_frame(8, payload_length, apply_mask(payload, mask), compressed, mask)
+    }
+    Data(BinaryFrame(payload)) -> {
+      let payload_length = bit_array.byte_size(payload)
+      make_frame(2, payload_length, payload, compressed, mask)
     }
     Control(PongFrame(payload)) -> {
       let payload_length = bit_array.byte_size(payload)
-      make_frame(10, payload_length, payload, mask)
+      make_frame(10, payload_length, payload, compressed, mask)
     }
     Control(PingFrame(payload)) -> {
       let payload_length = bit_array.byte_size(payload)
-      make_frame(9, payload_length, payload, mask)
+      make_frame(9, payload_length, payload, compressed, mask)
     }
-    Continuation(length, payload) -> make_frame(0, length, payload, mask)
+    Continuation(length, payload) ->
+      make_frame(0, length, payload, compressed, mask)
   }
 }
 
@@ -365,40 +334,16 @@ fn make_length(length: Int) -> BitArray {
   }
 }
 
-fn make_compressed_frame(
-  opcode: Int,
-  payload: BitArray,
-  context: Context,
-  mask: Option(BitArray),
-) -> BytesTree {
-  let data = compression.deflate(context, payload)
-  let length = bit_array.byte_size(data)
-  let length_section = make_length(length)
-
-  let masked = case option.is_some(mask) {
-    True -> 1
-    False -> 0
-  }
-
-  let mask_key = option.unwrap(mask, <<>>)
-
-  <<
-    1:1,
-    1:1,
-    0:2,
-    opcode:4,
-    masked:1,
-    length_section:bits,
-    mask_key:bits,
-    data:bits,
-  >>
-  |> bytes_tree.from_bit_array
+type Compression {
+  Compressed
+  Uncompressed
 }
 
 fn make_frame(
   opcode: Int,
   length: Int,
   payload: BitArray,
+  compressed: Compression,
   mask: Option(BitArray),
 ) -> BytesTree {
   let length_section = make_length(length)
@@ -410,9 +355,15 @@ fn make_frame(
 
   let mask_key = option.unwrap(mask, <<>>)
 
+  let compressed = case compressed {
+    Compressed -> 1
+    Uncompressed -> 0
+  }
+
   <<
     1:1,
-    0:3,
+    compressed:1,
+    0:2,
     opcode:4,
     masked:1,
     length_section:bits,
@@ -422,57 +373,63 @@ fn make_frame(
   |> bytes_tree.from_bit_array
 }
 
-fn apply_mask(data: BitArray, mask: BitArray) -> BitArray {
-  let assert <<
-    mask1:bytes-size(1),
-    mask2:bytes-size(1),
-    mask3:bytes-size(1),
-    mask4:bytes-size(1),
-  >> = mask
-  mask_data(data, [mask1, mask2, mask3, mask4], 0, <<>>)
-}
-
-pub fn to_text_frame(
-  data: String,
-  context: Option(Context),
-  mask: Option(BitArray),
-) -> BytesTree {
-  let data = bit_array.from_string(data)
-  let data =
-    mask
-    |> option.map(apply_mask(data, _))
-    |> option.unwrap(data)
-  let frame = Data(TextFrame(data))
-  case context {
-    Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
-    _ -> frame_to_bytes_tree(frame, mask)
+pub fn apply_mask(data: BitArray, mask: Option(BitArray)) -> BitArray {
+  case mask {
+    Some(mask) -> {
+      let assert <<
+        mask1:bytes-size(1),
+        mask2:bytes-size(1),
+        mask3:bytes-size(1),
+        mask4:bytes-size(1),
+      >> = mask
+      mask_data(data, [mask1, mask2, mask3, mask4], 0, <<>>)
+    }
+    None -> data
   }
 }
 
-pub fn to_binary_frame(
-  data: BitArray,
-  context: Option(Context),
-  mask: Option(BitArray),
-) -> BytesTree {
-  let data =
-    mask
-    |> option.map(apply_mask(data, _))
-    |> option.unwrap(data)
-  let frame = Data(BinaryFrame(data))
+pub fn apply_deflate(data: BitArray, context: Option(Context)) -> BitArray {
   case context {
-    Some(context) -> compressed_frame_to_bytes_tree(frame, context, mask)
-    _ -> frame_to_bytes_tree(frame, mask)
+    Some(context) -> compression.deflate(context, data)
+    _ -> data
   }
 }
 
-pub fn get_messages(
+pub fn apply_inflate(data: BitArray, context: Option(Context)) -> BitArray {
+  case context {
+    Some(context) -> compression.deflate(context, data)
+    _ -> data
+  }
+}
+
+fn to_frame(
   data: BitArray,
+  context: Option(Context),
+  mask: Option(BitArray),
+  create_inner_frame: fn(BitArray) -> a,
+  create_frame: fn(a) -> Frame,
+) -> BytesTree {
+  let frame =
+    data
+    |> apply_deflate(context)
+    |> apply_mask(mask)
+    |> create_inner_frame
+    |> create_frame
+  let compress = case context {
+    Some(_context) -> Compressed
+    _ -> Uncompressed
+  }
+  encode_frame(frame, compress, mask)
+}
+
+pub fn decode_many_frames(
+  data: BitArray,
+  context: Option(Context),
   frames: List(ParsedFrame),
-  context: Option(Context),
 ) -> #(List(ParsedFrame), BitArray) {
-  case frame_from_message(data, context) {
+  case decode_frame(data, context) {
     Ok(#(frame, <<>>)) -> #(list.reverse([frame, ..frames]), <<>>)
-    Ok(#(frame, rest)) -> get_messages(rest, [frame, ..frames], context)
+    Ok(#(frame, rest)) -> decode_many_frames(rest, context, [frame, ..frames])
     Error(NeedMoreData(rest)) -> #(list.reverse(frames), rest)
     Error(InvalidFrame) -> #(list.reverse(frames), data)
   }
@@ -544,18 +501,27 @@ fn inflate(
   compressed: Bool,
   context: Option(Context),
   data: BitArray,
-) -> Result(#(Int, BitArray), FrameParseError) {
+) -> Result(BitArray, FrameParseError) {
   case compressed, context {
     True, Some(context) -> {
-      let data = compression.inflate(context, data)
-      let length = bit_array.byte_size(data)
-      Ok(#(length, data))
+      Ok(compression.inflate(context, data))
     }
     True, None -> Error(InvalidFrame)
-    _, _ -> Ok(#(bit_array.byte_size(data), data))
+    _, _ -> Ok(data)
   }
 }
 
 pub fn has_deflate(extensions: List(String)) -> Bool {
   list.any(extensions, fn(str) { str == "permessage-deflate" })
+}
+
+pub fn get_client_takeovers(extensions: List(String)) -> ContextTakeover {
+  let no_client_context_takeover =
+    list.any(extensions, fn(str) { str == "client_no_context_takeover" })
+  let no_server_context_takeover =
+    list.any(extensions, fn(str) { str == "server_no_context_takeover" })
+  ContextTakeover(
+    no_client: no_client_context_takeover,
+    no_server: no_server_context_takeover,
+  )
 }
