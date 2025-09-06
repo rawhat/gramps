@@ -13,6 +13,9 @@ import gramps/websocket/compression.{
 pub type DataFrame {
   TextFrame(payload: BitArray)
   BinaryFrame(payload: BitArray)
+
+  CompressedTextFrame(payload: BitArray)
+  CompressedBinaryFrame(payload: BitArray)
 }
 
 pub type CloseReason {
@@ -49,26 +52,32 @@ pub type Frame {
 @external(erlang, "crypto", "exor")
 fn crypto_exor(a a: BitArray, b b: BitArray) -> BitArray
 
-fn mask_data(
-  data: BitArray,
-  masks: List(BitArray),
-  index: Int,
-  resp: BitArray,
-) -> BitArray {
-  case data {
-    <<masked:bits-size(8), rest:bits>> -> {
-      let assert [one, two, three, four] = masks
-      let mask_value = case index % 4 {
-        0 -> one
-        1 -> two
-        2 -> three
-        3 -> four
-        _ -> panic as "Somehow a value mod 4 is not 0, 1, 2, or 3"
+fn mask_data(data: BitArray, masks: List(BitArray)) -> BitArray {
+  let assert [m1, m2, m3, m4] = masks
+  let mask_key = <<m1:bits, m2:bits, m3:bits, m4:bits>>
+
+  let payload_size = bit_array.byte_size(data)
+  let full_mask = create_repeating_mask(mask_key, payload_size)
+  crypto_exor(data, full_mask)
+}
+
+fn create_repeating_mask(mask_key: BitArray, size: Int) -> BitArray {
+  case size {
+    1 | 2 | 3 | 4 -> bit_array.slice(mask_key, 0, size) |> result.unwrap(<<>>)
+
+    _ -> {
+      let repetitions = size / 4
+      let remainder = size % 4
+      let base = list.repeat(mask_key, repetitions) |> bit_array.concat
+
+      case remainder {
+        0 -> base
+        n -> {
+          let partial = bit_array.slice(mask_key, 0, n) |> result.unwrap(<<>>)
+          <<base:bits, partial:bits>>
+        }
       }
-      let unmasked = crypto_exor(mask_value, masked)
-      mask_data(rest, masks, index + 1, <<resp:bits, unmasked:bits>>)
     }
-    _ -> resp
   }
 }
 
@@ -90,7 +99,8 @@ pub fn decode_frame(
     <<
       complete:1,
       compressed:1,
-      _reserved:2,
+      rsv2:1,
+      rsv3:1,
       opcode:int-size(4),
       masked:1,
       payload_length:int-size(7),
@@ -98,15 +108,29 @@ pub fn decode_frame(
     >> -> {
       let compressed = compressed == 1
       let masked = masked == 1
+
       use <- bool.guard(
         when: compressed && option.is_none(context),
         return: Error(InvalidFrame),
       )
+
+      use <- bool.guard(rsv2 == 1 || rsv3 == 1, return: Error(InvalidFrame))
+
+      use <- bool.guard(
+        when: {
+          let is_control_frame = opcode >= 8 && opcode <= 10
+          let is_fragmented = complete == 0
+          is_control_frame && is_fragmented
+        },
+        return: Error(InvalidFrame),
+      )
+
       let payload_size = case payload_length {
         126 -> 16
         127 -> 64
         _ -> 0
       }
+
       let maybe_pair = case masked, rest {
         True,
           <<
@@ -122,17 +146,16 @@ pub fn decode_frame(
             0 -> payload_length
             n -> n
           }
-          case rest {
-            <<payload:bytes-size(payload_byte_size), rest:bits>> -> {
-              let data =
-                mask_data(payload, [mask1, mask2, mask3, mask4], 0, <<>>)
-              Ok(#(data, rest))
+
+          case bit_array.byte_size(rest) >= payload_byte_size, rest {
+            True, <<payload:bytes-size(payload_byte_size), remaining:bits>> -> {
+              let data = mask_data(payload, [mask1, mask2, mask3, mask4])
+              Ok(#(data, remaining))
             }
-            _ -> {
-              Error(NeedMoreData(message))
-            }
+            _, _ -> Error(NeedMoreData(message))
           }
         }
+        True, _rest -> Error(NeedMoreData(message))
         False, <<length:int-size(payload_size), rest:bits>> -> {
           let payload_byte_size = case length {
             0 -> payload_length
@@ -152,44 +175,44 @@ pub fn decode_frame(
 
       use #(data, rest) <- result.try(maybe_pair)
       case opcode {
-        0 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) {
-            Continuation(payload_size, decompressed)
-          })
-        }
+        0 -> Ok(Continuation(payload_size, data))
         1 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) { Data(TextFrame(decompressed)) })
+          case complete == 1, compressed {
+            True, True -> Ok(Data(CompressedTextFrame(data)))
+            True, False -> Ok(Data(TextFrame(data)))
+            False, True -> Ok(Data(CompressedTextFrame(data)))
+            False, False -> Ok(Data(TextFrame(data)))
+          }
         }
         2 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) { Data(BinaryFrame(decompressed)) })
+          case compressed {
+            True -> Ok(Data(CompressedBinaryFrame(data)))
+            False -> Ok(Data(BinaryFrame(data)))
+          }
         }
         8 -> {
           case data {
-            <<1000:16, rest:bits>> -> Ok(Control(CloseFrame(Normal(rest))))
-            <<1001:16, rest:bits>> -> Ok(Control(CloseFrame(GoingAway(rest))))
-            <<1002:16, rest:bits>> ->
-              Ok(Control(CloseFrame(ProtocolError(rest))))
-            <<1003:16, rest:bits>> ->
-              Ok(Control(CloseFrame(UnexpectedDataType(rest))))
-            <<1007:16, rest:bits>> ->
-              Ok(Control(CloseFrame(InconsistentDataType(rest))))
-            <<1008:16, rest:bits>> ->
-              Ok(Control(CloseFrame(PolicyViolation(rest))))
-            <<1009:16, rest:bits>> ->
-              Ok(Control(CloseFrame(MessageTooBig(rest))))
-            <<1010:16, rest:bits>> ->
-              Ok(Control(CloseFrame(MissingExtensions(rest))))
-            <<1011:16, rest:bits>> ->
-              Ok(Control(CloseFrame(UnexpectedCondition(rest))))
-            <<code:16, rest:bits>> ->
-              Ok(Control(CloseFrame(CustomCloseReason(code, rest))))
-            _ -> Ok(Control(CloseFrame(NotProvided)))
+            <<>> -> Ok(Control(CloseFrame(NotProvided)))
+            <<code:16, rest:bits>> -> {
+              case is_valid_close_code(code), bit_array.is_utf8(rest) {
+                True, True -> {
+                  case code {
+                    1000 -> Ok(Control(CloseFrame(Normal(rest))))
+                    1001 -> Ok(Control(CloseFrame(GoingAway(rest))))
+                    1002 -> Ok(Control(CloseFrame(ProtocolError(rest))))
+                    1003 -> Ok(Control(CloseFrame(UnexpectedDataType(rest))))
+                    1007 -> Ok(Control(CloseFrame(InconsistentDataType(rest))))
+                    1008 -> Ok(Control(CloseFrame(PolicyViolation(rest))))
+                    1009 -> Ok(Control(CloseFrame(MessageTooBig(rest))))
+                    1010 -> Ok(Control(CloseFrame(MissingExtensions(rest))))
+                    1011 -> Ok(Control(CloseFrame(UnexpectedCondition(rest))))
+                    _ -> Ok(Control(CloseFrame(CustomCloseReason(code, rest))))
+                  }
+                }
+                _, _ -> Error(InvalidFrame)
+              }
+            }
+            _ -> Error(InvalidFrame)
           }
         }
         9 -> Ok(Control(PingFrame(data)))
@@ -204,7 +227,15 @@ pub fn decode_frame(
         }
       })
     }
-    _ -> Error(InvalidFrame)
+    _ -> Error(NeedMoreData(message))
+  }
+}
+
+fn is_valid_close_code(code: Int) -> Bool {
+  case code {
+    1000 | 1001 | 1002 | 1003 | 1007 | 1008 | 1009 | 1010 | 1011 -> True
+    code if code >= 3000 && code <= 4999 -> True
+    _ -> False
   }
 }
 
@@ -258,6 +289,12 @@ fn encode_frame(
       let payload_length = bit_array.byte_size(payload)
       make_frame(1, payload_length, payload, compressed, mask)
     }
+
+    Data(CompressedTextFrame(_)) ->
+      panic as "CompressedTextFrame should not be used by user"
+    Data(CompressedBinaryFrame(_)) ->
+      panic as "CompressedBinaryFrame should not be used by user"
+
     Control(CloseFrame(reason)) -> {
       let #(payload_length, payload) = case reason {
         NotProvided -> #(0, <<>>)
@@ -382,7 +419,7 @@ pub fn apply_mask(data: BitArray, mask: Option(BitArray)) -> BitArray {
         mask3:bytes-size(1),
         mask4:bytes-size(1),
       >> = mask
-      mask_data(data, [mask1, mask2, mask3, mask4], 0, <<>>)
+      mask_data(data, [mask1, mask2, mask3, mask4])
     }
     None -> data
   }
@@ -397,7 +434,7 @@ pub fn apply_deflate(data: BitArray, context: Option(Context)) -> BitArray {
 
 pub fn apply_inflate(data: BitArray, context: Option(Context)) -> BitArray {
   case context {
-    Some(context) -> compression.deflate(context, data)
+    Some(context) -> compression.inflate(context, data)
     _ -> data
   }
 }
@@ -435,40 +472,154 @@ pub fn decode_many_frames(
   }
 }
 
-fn append_frame(left: Frame, data: BitArray) -> Frame {
-  case left {
-    Data(TextFrame(payload)) -> Data(TextFrame(<<payload:bits, data:bits>>))
-    Data(BinaryFrame(payload)) -> Data(BinaryFrame(<<payload:bits, data:bits>>))
-    Control(CloseFrame(..)) -> left
-    Control(PingFrame(payload)) ->
-      Control(PingFrame(<<payload:bits, data:bits>>))
-    Control(PongFrame(payload)) ->
-      Control(PongFrame(<<payload:bits, data:bits>>))
-    Continuation(..) -> left
+pub type ManyFramesParseError {
+  NeedMoreDataAccumulated(parsed: List(ParsedFrame), rest: BitArray)
+  ContainsInvalidFrame
+}
+
+pub fn decode_many_frames_result(
+  data: BitArray,
+  context: Option(Context),
+  frames: List(ParsedFrame),
+) -> Result(#(List(ParsedFrame), BitArray), ManyFramesParseError) {
+  case decode_frame(data, context) {
+    Ok(#(frame, <<>>)) -> Ok(#(list.reverse([frame, ..frames]), <<>>))
+    Ok(#(frame, rest)) ->
+      decode_many_frames_result(rest, context, [frame, ..frames])
+    Error(NeedMoreData(rest)) ->
+      Error(NeedMoreDataAccumulated(list.reverse(frames), rest))
+    Error(InvalidFrame) -> Error(ContainsInvalidFrame)
   }
 }
 
 pub fn aggregate_frames(
   frames: List(ParsedFrame),
-  previous: Option(Frame),
+  accumulated: Option(#(Frame, List(BitArray))),
   joined: List(Frame),
+  context: Option(Context),
 ) -> Result(List(Frame), Nil) {
-  case frames, previous {
+  case frames, accumulated {
+    // No more frames - we are done
     [], _ -> Ok(list.reverse(joined))
-    [Complete(Continuation(payload: data, ..)), ..rest], Some(prev) -> {
-      let next = append_frame(prev, data)
-      aggregate_frames(rest, None, [next, ..joined])
-    }
-    [Incomplete(Continuation(payload: data, ..)), ..rest], Some(prev) -> {
-      let next = append_frame(prev, data)
-      aggregate_frames(rest, Some(next), joined)
-    }
-    [Incomplete(frame), ..rest], None -> {
-      aggregate_frames(rest, Some(frame), joined)
-    }
+
+    // Complete standalone frame
     [Complete(frame), ..rest], None -> {
-      aggregate_frames(rest, None, [frame, ..joined])
+      case frame {
+        Data(CompressedTextFrame(data)) -> {
+          // Complete compressed frame - decompress it
+          case context {
+            Some(ctx) -> {
+              let decompressed = compression.inflate(ctx, data)
+              case bit_array.is_utf8(decompressed) {
+                True -> {
+                  let final_frame = Data(TextFrame(decompressed))
+                  aggregate_frames(rest, None, [final_frame, ..joined], context)
+                }
+                False -> Error(Nil)
+              }
+            }
+            None -> Error(Nil)
+          }
+        }
+        Data(CompressedBinaryFrame(data)) -> {
+          case context {
+            Some(ctx) -> {
+              let decompressed = compression.inflate(ctx, data)
+              let final_frame = Data(BinaryFrame(decompressed))
+              aggregate_frames(rest, None, [final_frame, ..joined], context)
+            }
+            None -> Error(Nil)
+          }
+        }
+        Data(TextFrame(data)) -> {
+          case bit_array.is_utf8(data) {
+            True -> aggregate_frames(rest, None, [frame, ..joined], context)
+            False -> Error(Nil)
+          }
+        }
+        Data(BinaryFrame(_)) ->
+          aggregate_frames(rest, None, [frame, ..joined], context)
+        Control(_) -> aggregate_frames(rest, None, [frame, ..joined], context)
+        Continuation(..) -> Error(Nil)
+      }
     }
+
+    // Incomplete frame starting fragmentation
+    [Incomplete(frame), ..rest], None -> {
+      let initial_payload = case frame {
+        Data(TextFrame(payload)) -> payload
+        Data(BinaryFrame(payload)) -> payload
+        Data(CompressedTextFrame(payload)) -> payload
+        Data(CompressedBinaryFrame(payload)) -> payload
+        Continuation(_, payload) -> payload
+        Control(_) -> <<>>
+      }
+      aggregate_frames(rest, Some(#(frame, [initial_payload])), joined, context)
+    }
+
+    // Complete continuation; finish fragmented message
+    [Complete(Continuation(payload: data, ..)), ..rest],
+      Some(#(initial_frame, payloads))
+    -> {
+      let all_payloads = [data, ..payloads] |> list.reverse()
+      let final_payload = bit_array.concat(all_payloads)
+
+      case initial_frame {
+        Data(CompressedTextFrame(_)) -> {
+          case context {
+            Some(ctx) -> {
+              let decompressed = compression.inflate(ctx, final_payload)
+              case bit_array.is_utf8(decompressed) {
+                True -> {
+                  let final_frame = Data(TextFrame(decompressed))
+                  aggregate_frames(rest, None, [final_frame, ..joined], context)
+                }
+                False -> Error(Nil)
+              }
+            }
+            None -> Error(Nil)
+          }
+        }
+        Data(CompressedBinaryFrame(_)) -> {
+          case context {
+            Some(ctx) -> {
+              let decompressed = compression.inflate(ctx, final_payload)
+              let final_frame = Data(BinaryFrame(decompressed))
+              aggregate_frames(rest, None, [final_frame, ..joined], context)
+            }
+            None -> Error(Nil)
+          }
+        }
+        Data(TextFrame(_)) -> {
+          case bit_array.is_utf8(final_payload) {
+            True -> {
+              let final_frame = Data(TextFrame(final_payload))
+              aggregate_frames(rest, None, [final_frame, ..joined], context)
+            }
+            False -> Error(Nil)
+          }
+        }
+        Data(BinaryFrame(_)) -> {
+          let final_frame = Data(BinaryFrame(final_payload))
+          aggregate_frames(rest, None, [final_frame, ..joined], context)
+        }
+        Control(_) -> Error(Nil)
+        Continuation(..) -> Error(Nil)
+      }
+    }
+
+    // Incomplete continuation; keep building the message
+    [Incomplete(Continuation(payload: data, ..)), ..rest],
+      Some(#(initial_frame, payloads))
+    -> {
+      aggregate_frames(
+        rest,
+        Some(#(initial_frame, [data, ..payloads])),
+        joined,
+        context,
+      )
+    }
+
     _, _ -> Error(Nil)
   }
 }
@@ -496,20 +647,6 @@ fn crypto_hash(hash hash: ShaHash, data data: String) -> String
 
 @external(erlang, "base64", "encode")
 fn base64_encode(data data: String) -> String
-
-fn inflate(
-  compressed: Bool,
-  context: Option(Context),
-  data: BitArray,
-) -> Result(BitArray, FrameParseError) {
-  case compressed, context {
-    True, Some(context) -> {
-      Ok(compression.inflate(context, data))
-    }
-    True, None -> Error(InvalidFrame)
-    _, _ -> Ok(data)
-  }
-}
 
 pub fn has_deflate(extensions: List(String)) -> Bool {
   list.any(extensions, fn(str) { str == "permessage-deflate" })
