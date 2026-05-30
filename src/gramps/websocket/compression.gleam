@@ -92,6 +92,7 @@ pub fn deflate(context: Context, data: BitArray) -> BitArray {
   let size = bit_array.byte_size(data) - 4
 
   let return = case data {
+    <<>> -> <<0x00>>
     <<value:bytes-size(size), 0x00, 0x00, 0xFF, 0xFF>> -> value
     _ -> data
   }
