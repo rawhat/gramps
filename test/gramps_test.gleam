@@ -1,8 +1,10 @@
 import gleam/bit_array
 import gleam/bytes_tree
+import gleam/crypto
 import gleam/http.{Http}
 import gleam/http/request
 import gleam/http/response
+import gleam/list
 import gleam/option.{None, Some}
 import gleeunit
 import gramps/debug
@@ -156,4 +158,87 @@ pub fn it_should_return_literal_bits_complex_test() {
       1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1,
       1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
     ]
+}
+
+// --- masking ---------------------------------------------------------------
+
+@external(erlang, "crypto", "exor")
+fn crypto_exor(a a: BitArray, b b: BitArray) -> BitArray
+
+/// The previous implementation, kept here as the thing to agree with.
+///
+/// It walked the payload a byte at a time, picking a mask byte by index.
+fn mask_byte_by_byte(
+  data: BitArray,
+  masks: List(BitArray),
+  index: Int,
+  resp: BitArray,
+) -> BitArray {
+  case data {
+    <<masked:bits-size(8), rest:bits>> -> {
+      let assert [one, two, three, four] = masks
+      let mask_value = case index % 4 {
+        0 -> one
+        1 -> two
+        2 -> three
+        3 -> four
+        _ -> panic as "a value mod 4 is not 0, 1, 2, or 3"
+      }
+      let unmasked = crypto_exor(mask_value, masked)
+      mask_byte_by_byte(rest, masks, index + 1, <<resp:bits, unmasked:bits>>)
+    }
+    _ -> resp
+  }
+}
+
+fn split_mask(mask: BitArray) -> List(BitArray) {
+  let assert <<
+    one:bytes-size(1),
+    two:bytes-size(1),
+    three:bytes-size(1),
+    four:bytes-size(1),
+  >> = mask
+  [one, two, three, four]
+}
+
+pub fn masking_matches_the_byte_at_a_time_result_test() {
+  let mask = <<0x37, 0xfa, 0x21, 0x3d>>
+
+  // Sizes chosen to cover every case that tends to break a rewrite: empty,
+  // shorter than the mask, not a multiple of it, and either side of the two
+  // frame-length boundaries where the header grows.
+  [0, 1, 2, 3, 4, 5, 7, 8, 125, 126, 127, 255, 1000, 65_535, 65_536]
+  |> list.each(fn(size) {
+    let payload = crypto.strong_random_bytes(size)
+
+    assert websocket.apply_mask(payload, Some(mask))
+      == mask_byte_by_byte(payload, split_mask(mask), 0, <<>>)
+  })
+}
+
+pub fn masking_is_its_own_inverse_test() {
+  // XOR with the same key twice is the identity, which is what lets the same
+  // routine both mask and unmask.
+  let mask = <<0x01, 0x02, 0x03, 0x04>>
+  let payload = <<"the quick brown fox":utf8>>
+
+  let masked = websocket.apply_mask(payload, Some(mask))
+  assert masked != payload
+  assert websocket.apply_mask(masked, Some(mask)) == payload
+}
+
+pub fn the_rfc_6455_example_test() {
+  // RFC 6455 section 5.7: "Hello" under mask 0x37fa213d is 0x7f9f4d5158.
+  let masked =
+    websocket.apply_mask(
+      <<"Hello":utf8>>,
+      option.Some(<<0x37, 0xfa, 0x21, 0x3d>>),
+    )
+
+  assert masked == <<0x7f, 0x9f, 0x4d, 0x51, 0x58>>
+}
+
+pub fn an_unmasked_frame_is_left_alone_test() {
+  let payload = <<"unchanged":utf8>>
+  assert websocket.apply_mask(payload, None) == payload
 }
