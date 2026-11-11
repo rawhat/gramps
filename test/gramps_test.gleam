@@ -8,6 +8,7 @@ import gleeunit
 import gramps/debug
 import gramps/http as gramps_http
 import gramps/websocket
+import gramps/websocket/compression
 
 pub fn main() {
   gleeunit.main()
@@ -156,4 +157,82 @@ pub fn it_should_return_literal_bits_complex_test() {
       1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1,
       1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
     ]
+}
+
+// RFC 7692 section 6.1: only the first fragment of a compressed message has
+// RSV1 set, and the compressed payload is split across the fragments.
+fn fragmented_compressed_text(
+  text: String,
+) -> #(BitArray, compression.Context) {
+  let client = compression.init(compression.ContextTakeover(False, False))
+  let server = compression.init(compression.ContextTakeover(False, False))
+  let payload = compression.deflate(client.deflate, bit_array.from_string(text))
+  let half = bit_array.byte_size(payload) / 2
+  let assert Ok(first) = bit_array.slice(payload, 0, half)
+  let assert Ok(second) =
+    bit_array.slice(payload, half, bit_array.byte_size(payload) - half)
+  let frames = <<
+    0:1,
+    1:1,
+    0:2,
+    1:4,
+    0:1,
+    { bit_array.byte_size(first) }:7,
+    first:bits,
+    1:1,
+    0:1,
+    0:2,
+    0:4,
+    0:1,
+    { bit_array.byte_size(second) }:7,
+    second:bits,
+  >>
+  #(frames, server.inflate)
+}
+
+const long_text =
+  "hello, fragmented and compressed world! hello, fragmented and compressed world!"
+
+pub fn it_should_decode_fragmented_compressed_message_test() {
+  let #(frames, inflate) = fragmented_compressed_text(long_text)
+  let #(parsed, rest) = websocket.decode_many_frames(frames, Some(inflate), [])
+  assert rest == <<>>
+  assert websocket.aggregate_frames(parsed, None, [])
+    == Ok([websocket.Data(websocket.TextFrame(<<long_text:utf8>>))])
+}
+
+pub fn it_should_handle_control_frame_between_compressed_fragments_test() {
+  let #(frames, inflate) = fragmented_compressed_text(long_text)
+  let assert <<0:1, _:7, 0:1, len:7, first:bytes-size(len), second:bits>> =
+    frames
+  let ping = <<1:1, 0:3, 9:4, 0:1, 2:7, "hi">>
+  let frames = <<
+    0:1, 1:1, 0:2, 1:4, 0:1, len:7, first:bits, ping:bits, second:bits,
+  >>
+  let #(parsed, rest) = websocket.decode_many_frames(frames, Some(inflate), [])
+  assert rest == <<>>
+  assert websocket.aggregate_frames(parsed, None, [])
+    == Ok([
+      websocket.Control(websocket.PingFrame(<<"hi">>)),
+      websocket.Data(websocket.TextFrame(<<long_text:utf8>>)),
+    ])
+}
+
+pub fn it_should_wait_for_all_compressed_fragments_test() {
+  let #(frames, inflate) = fragmented_compressed_text(long_text)
+  let assert <<0:1, _:7, 0:1, len:7, _:bytes-size(len), _:bits>> = frames
+  let partial = bit_array.slice(frames, 0, 2 + len)
+  let assert Ok(partial) = partial
+  assert websocket.decode_many_frames(partial, Some(inflate), [])
+    == #([], partial)
+}
+
+pub fn it_should_still_decode_uncompressed_fragments_test() {
+  let frames = <<
+    0:1, 0:3, 1:4, 0:1, 6:7, "hello,", 1:1, 0:3, 0:4, 0:1, 6:7, " world",
+  >>
+  let #(parsed, rest) = websocket.decode_many_frames(frames, None, [])
+  assert rest == <<>>
+  assert websocket.aggregate_frames(parsed, None, [])
+    == Ok([websocket.Data(websocket.TextFrame(<<"hello, world">>))])
 }

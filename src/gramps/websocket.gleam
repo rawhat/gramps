@@ -86,6 +86,34 @@ pub fn decode_frame(
   message: BitArray,
   context: Option(Context),
 ) -> Result(#(ParsedFrame, BitArray), FrameParseError) {
+  use raw <- result.try(decode_raw_frame(message, context))
+  use data <- result.try(inflate(raw.compressed, context, raw.data))
+  use frame <- result.map(build_frame(raw.opcode, data))
+  #(wrap_frame(raw.complete, frame), raw.rest)
+}
+
+/// A frame whose payload has been unmasked but not yet decompressed.
+type RawFrame {
+  RawFrame(
+    complete: Bool,
+    compressed: Bool,
+    opcode: Int,
+    data: BitArray,
+    rest: BitArray,
+  )
+}
+
+fn wrap_frame(complete: Bool, frame: Frame) -> ParsedFrame {
+  case complete {
+    True -> Complete(frame)
+    False -> Incomplete(frame)
+  }
+}
+
+fn decode_raw_frame(
+  message: BitArray,
+  context: Option(Context),
+) -> Result(RawFrame, FrameParseError) {
   case message {
     <<
       complete:1,
@@ -151,59 +179,39 @@ pub fn decode_frame(
       }
 
       use #(data, rest) <- result.try(maybe_pair)
-      case opcode {
-        0 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) {
-            Continuation(payload_size, decompressed)
-          })
-        }
-        1 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) { Data(TextFrame(decompressed)) })
-        }
-        2 -> {
-          data
-          |> inflate(compressed, context, _)
-          |> result.map(fn(decompressed) { Data(BinaryFrame(decompressed)) })
-        }
-        8 -> {
-          case data {
-            <<1000:16, rest:bits>> -> Ok(Control(CloseFrame(Normal(rest))))
-            <<1001:16, rest:bits>> -> Ok(Control(CloseFrame(GoingAway(rest))))
-            <<1002:16, rest:bits>> ->
-              Ok(Control(CloseFrame(ProtocolError(rest))))
-            <<1003:16, rest:bits>> ->
-              Ok(Control(CloseFrame(UnexpectedDataType(rest))))
-            <<1007:16, rest:bits>> ->
-              Ok(Control(CloseFrame(InconsistentDataType(rest))))
-            <<1008:16, rest:bits>> ->
-              Ok(Control(CloseFrame(PolicyViolation(rest))))
-            <<1009:16, rest:bits>> ->
-              Ok(Control(CloseFrame(MessageTooBig(rest))))
-            <<1010:16, rest:bits>> ->
-              Ok(Control(CloseFrame(MissingExtensions(rest))))
-            <<1011:16, rest:bits>> ->
-              Ok(Control(CloseFrame(UnexpectedCondition(rest))))
-            <<code:16, rest:bits>> ->
-              Ok(Control(CloseFrame(CustomCloseReason(code, rest))))
-            _ -> Ok(Control(CloseFrame(NotProvided)))
-          }
-        }
-        9 -> Ok(Control(PingFrame(data)))
-        10 -> Ok(Control(PongFrame(data)))
-        _ -> Error(InvalidFrame)
-      }
-      |> result.try(fn(frame) {
-        case complete {
-          1 -> Ok(#(Complete(frame), rest))
-          0 -> Ok(#(Incomplete(frame), rest))
-          _ -> Error(InvalidFrame)
-        }
-      })
+      Ok(RawFrame(complete: complete == 1, compressed:, opcode:, data:, rest:))
     }
+    _ -> Error(InvalidFrame)
+  }
+}
+
+fn build_frame(opcode: Int, data: BitArray) -> Result(Frame, FrameParseError) {
+  case opcode {
+    0 -> Ok(Continuation(bit_array.byte_size(data), data))
+    1 -> Ok(Data(TextFrame(data)))
+    2 -> Ok(Data(BinaryFrame(data)))
+    8 -> {
+      case data {
+        <<1000:16, rest:bits>> -> Ok(Control(CloseFrame(Normal(rest))))
+        <<1001:16, rest:bits>> -> Ok(Control(CloseFrame(GoingAway(rest))))
+        <<1002:16, rest:bits>> -> Ok(Control(CloseFrame(ProtocolError(rest))))
+        <<1003:16, rest:bits>> ->
+          Ok(Control(CloseFrame(UnexpectedDataType(rest))))
+        <<1007:16, rest:bits>> ->
+          Ok(Control(CloseFrame(InconsistentDataType(rest))))
+        <<1008:16, rest:bits>> -> Ok(Control(CloseFrame(PolicyViolation(rest))))
+        <<1009:16, rest:bits>> -> Ok(Control(CloseFrame(MessageTooBig(rest))))
+        <<1010:16, rest:bits>> ->
+          Ok(Control(CloseFrame(MissingExtensions(rest))))
+        <<1011:16, rest:bits>> ->
+          Ok(Control(CloseFrame(UnexpectedCondition(rest))))
+        <<code:16, rest:bits>> ->
+          Ok(Control(CloseFrame(CustomCloseReason(code, rest))))
+        _ -> Ok(Control(CloseFrame(NotProvided)))
+      }
+    }
+    9 -> Ok(Control(PingFrame(data)))
+    10 -> Ok(Control(PongFrame(data)))
     _ -> Error(InvalidFrame)
   }
 }
@@ -427,11 +435,79 @@ pub fn decode_many_frames(
   context: Option(Context),
   frames: List(ParsedFrame),
 ) -> #(List(ParsedFrame), BitArray) {
-  case decode_frame(data, context) {
-    Ok(#(frame, <<>>)) -> #(list.reverse([frame, ..frames]), <<>>)
-    Ok(#(frame, rest)) -> decode_many_frames(rest, context, [frame, ..frames])
+  case decode_raw_frame(data, context) {
+    // RFC 7692: only the first frame of a fragmented compressed message has
+    // RSV1 set, and the compressed payload is split across the continuation
+    // frames. It can only be inflated once the whole message has arrived.
+    Ok(RawFrame(complete: False, compressed: True, opcode:, ..) as first)
+      if opcode == 1 || opcode == 2
+    ->
+      case collect_fragments(first.rest, context, [first.data], []) {
+        Ok(#(payload, control, rest)) -> {
+          let frames = list.append(list.reverse(control), frames)
+          case
+            inflate(True, context, payload)
+            |> result.try(build_frame(opcode, _))
+          {
+            Ok(frame) ->
+              continue_decoding(rest, context, [Complete(frame), ..frames])
+            Error(_) -> #(list.reverse(frames), data)
+          }
+        }
+        // Wait for the rest of the message, then decode it from the start.
+        Error(Nil) -> #(list.reverse(frames), data)
+      }
+    Ok(raw) ->
+      case
+        inflate(raw.compressed, context, raw.data)
+        |> result.try(build_frame(raw.opcode, _))
+      {
+        Ok(frame) ->
+          continue_decoding(raw.rest, context, [
+            wrap_frame(raw.complete, frame),
+            ..frames
+          ])
+        Error(_) -> #(list.reverse(frames), data)
+      }
     Error(NeedMoreData(rest)) -> #(list.reverse(frames), rest)
     Error(InvalidFrame) -> #(list.reverse(frames), data)
+  }
+}
+
+fn continue_decoding(
+  rest: BitArray,
+  context: Option(Context),
+  frames: List(ParsedFrame),
+) -> #(List(ParsedFrame), BitArray) {
+  case rest {
+    <<>> -> #(list.reverse(frames), <<>>)
+    _ -> decode_many_frames(rest, context, frames)
+  }
+}
+
+/// Collect the continuation frames of a fragmented message. Control frames
+/// may be interleaved with the fragments, so they are returned separately.
+fn collect_fragments(
+  data: BitArray,
+  context: Option(Context),
+  payload: List(BitArray),
+  control: List(ParsedFrame),
+) -> Result(#(BitArray, List(ParsedFrame), BitArray), Nil) {
+  case decode_raw_frame(data, context) {
+    Ok(RawFrame(opcode: 0, complete:, data: fragment, rest:, ..)) -> {
+      let payload = [fragment, ..payload]
+      case complete {
+        True -> Ok(#(bit_array.concat(list.reverse(payload)), control, rest))
+        False -> collect_fragments(rest, context, payload, control)
+      }
+    }
+    Ok(RawFrame(opcode:, data: body, rest:, ..)) if opcode >= 8 ->
+      case build_frame(opcode, body) {
+        Ok(frame) ->
+          collect_fragments(rest, context, payload, [Complete(frame), ..control])
+        Error(_) -> Error(Nil)
+      }
+    _ -> Error(Nil)
   }
 }
 
