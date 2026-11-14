@@ -1,6 +1,6 @@
 import gleam/bytes_tree.{type BytesTree}
 import gleam/dynamic.{type Dynamic}
-import gleam/http.{type Header, type Scheme}
+import gleam/http.{type Scheme}
 import gleam/http/request.{type Request, Request}
 import gleam/http/response.{type Response, Response}
 import gleam/int
